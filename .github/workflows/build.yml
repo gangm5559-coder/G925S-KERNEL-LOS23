@@ -1,4 +1,4 @@
-name: Build LOS23 Kernel zerolteskt G925S - Fix 128 v3
+name: Build LOS23 Kernel zerolteskt G925S - No Git Clone v4
 
 on:
   workflow_dispatch:
@@ -7,10 +7,8 @@ jobs:
   build-kernel:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout self (for boot parts)
+      - name: Checkout self
         uses: actions/checkout@v4
-        with:
-          path: self
 
       - name: Free disk
         run: |
@@ -20,36 +18,47 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf libelf-dev libncurses5-dev libssl-dev python3 gcc-aarch64-linux-gnu device-tree-compiler cpio
+          sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf libelf-dev libncurses5-dev libssl-dev python3 gcc-aarch64-linux-gnu device-tree-compiler cpio tar
 
-      - name: Restore boot.img parts
+      - name: Restore boot parts
         run: |
-          cd self
-          if ls boot_part_* 1>/dev/null 2>&1; then cat boot_part_* > boot.img; echo "Merged"; fi
-          ls -lh *.img 2>/dev/null || true
-          cp boot.img ../boot.img 2>/dev/null || true
-          cd ..
+          if ls boot_part_* 1>/dev/null 2>&1; then cat boot_part_* > boot.img; echo "Merged boot.img"; ls -lh boot.img; fi
 
-      - name: Clone kernel via checkout action (bypass git clone 128)
-        uses: actions/checkout@v4
-        with:
-          repository: samsungexynos7420/android_kernel_samsung_exynos7420
-          path: kernel
-          fetch-depth: 1
-
-      - name: Fallback clone if first failed
-        if: failure()
-        uses: actions/checkout@v4
-        with:
-          repository: LineageOS/android_kernel_samsung_exynos7420
-          path: kernel
-          fetch-depth: 1
-
-      - name: List configs
+      - name: Download kernel tarball - NO git clone (Fix 128)
         run: |
-          ls kernel/arch/arm64/configs/ | grep -E "7420|zerolte|zeroflte" || ls kernel/arch/arm64/configs/ | head -30
-          cd kernel
-          git branch -a | head -20
+          set +e
+          rm -rf kernel.tar.gz kernel
+          # Try multiple branches via tarball download - bypasses git error 128
+          for branch in lineage-20.0 lineage-21.0 lineage-20 lineage-19.1 main master; do
+            echo "Trying branch $branch from samsungexynos7420"
+            curl -L -f --retry 3 https://github.com/samsungexynos7420/android_kernel_samsung_exynos7420/archive/refs/heads/$branch.tar.gz -o kernel.tar.gz
+            if [ $? -eq 0 ] && [ -f kernel.tar.gz ]; then
+              echo "Downloaded $branch"
+              tar xzf kernel.tar.gz
+              mv android_kernel_samsung_exynos7420-$branch kernel 2>/dev/null || mv android_kernel_samsung_exynos7420-* kernel 2>/dev/null || true
+              if [ -d kernel ]; then
+                echo "Success $branch"
+                break
+              fi
+            fi
+            rm -rf kernel.tar.gz kernel android_kernel*
+          done
+          # Fallback LineageOS repo
+          if [ ! -d kernel ]; then
+            for branch in lineage-20.0 lineage-21.0 lineage-20 main; do
+              echo "Trying LineageOS branch $branch"
+              curl -L -f --retry 3 https://github.com/LineageOS/android_kernel_samsung_exynos7420/archive/refs/heads/$branch.tar.gz -o kernel.tar.gz
+              if [ $? -eq 0 ]; then
+                tar xzf kernel.tar.gz
+                mv android_kernel_samsung_exynos7420-$branch kernel 2>/dev/null || mv android_kernel* kernel 2>/dev/null || true
+                if [ -d kernel ]; then break; fi
+              fi
+              rm -rf kernel.tar.gz kernel android_kernel*
+            done
+          fi
+          set -e
+          ls -lh kernel/ | head -20
+          ls kernel/arch/arm64/configs/ | grep -E "7420|zerolte" | head -20
 
       - name: Build kernel
         run: |
@@ -59,7 +68,7 @@ jobs:
           make exynos7420-zerolteskt_defconfig || make exynos7420-zeroltexx_defconfig || make exynos7420-zeroflte_defconfig
           make -j$(nproc --all) Image dtbs || make -j4 Image
           mkdir -p ../out_kernel
-          cp arch/arm64/boot/Image ../out_kernel/ 2>/dev/null || cp arch/arm/boot/zImage ../out_kernel/ 2>/dev/null || cp arch/arm64/boot/Image.gz ../out_kernel/ 2>/dev/null || true
+          cp arch/arm64/boot/Image ../out_kernel/ 2>/dev/null || cp arch/arm/boot/zImage ../out_kernel/ 2>/dev/null || true
           find arch/arm64/boot/dts -name "*.dtb" -exec cp {} ../out_kernel/ \; 2>/dev/null || true
           ls -lh ../out_kernel/
 
@@ -70,16 +79,12 @@ jobs:
           cp magisk_tmp/lib/arm64-v8a/libmagiskboot.so ./magiskboot 2>/dev/null || wget -q https://github.com/ooki/magiskboot_build/raw/master/magiskboot -O magiskboot || true
           chmod +x magiskboot || true
 
-      - name: Repack boot.img
+      - name: Repack
         run: |
-          BOOT_IMG="boot.img"
-          if [ ! -f "$BOOT_IMG" ]; then BOOT_IMG="self/boot.img"; fi
-          echo "BOOT_IMG=$BOOT_IMG"
-          if [ -f "$BOOT_IMG" ] && [ -f "./magiskboot" ]; then
-            ./magiskboot unpack "$BOOT_IMG" || true
-            cp out_kernel/Image kernel 2>/dev/null || cp out_kernel/zImage kernel 2>/dev/null || cp out_kernel/Image.gz kernel 2>/dev/null || true
-            ls -lh kernel ramdisk.cpio* 2>/dev/null || true
-            ./magiskboot repack "$BOOT_IMG" new-boot-lOS23-zerolteskt.img || true
+          if [ -f boot.img ] && [ -f ./magiskboot ]; then
+            ./magiskboot unpack boot.img || true
+            cp out_kernel/Image kernel 2>/dev/null || cp out_kernel/zImage kernel 2>/dev/null || true
+            ./magiskboot repack boot.img new-boot-lOS23-zerolteskt.img || true
             mkdir -p out_final
             cp new-boot*.img out_final/ 2>/dev/null || true
           else
