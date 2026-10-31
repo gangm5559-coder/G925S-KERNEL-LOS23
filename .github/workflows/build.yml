@@ -7,13 +7,12 @@ jobs:
   build-kernel:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout repo (for LOS22 boot.img if uploaded)
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Free disk BEFORE checkout
+      - name: Free disk
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache /usr/local/lib/android /usr/share/swift /opt/az
-          sudo rm -rf /home/runner/actions-runner/cached/_diag 2>/dev/null || true
           df -h
 
       - name: Install deps
@@ -21,57 +20,61 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf libelf-dev libncurses5-dev libssl-dev python3 gcc-aarch64-linux-gnu device-tree-compiler cpio
 
-      - name: Clone kernel - LineageOS official (no 128 error)
+      - name: Restore split boot.img if uploaded as parts (bypass 25MB limit)
+        run: |
+          ls -lh
+          if ls boot_part_* 1>/dev/null 2>&1; then
+            echo "Found split parts, merging..."
+            cat boot_part_* > boot.img
+            ls -lh boot.img
+          fi
+          if ls *.img 1>/dev/null 2>&1; then ls -lh *.img; fi
+
+      - name: Clone kernel
         run: |
           git clone https://github.com/LineageOS/android_kernel_samsung_exynos7420 -b lineage-22.2 --depth=1 kernel || git clone https://github.com/LineageOS/android_kernel_samsung_exynos7420 -b lineage-20.0 --depth=1 kernel
           cd kernel
           ls arch/arm64/configs/ | grep -E "7420|zerolte"
 
-      - name: Build kernel Image for zerolteskt
+      - name: Build kernel Image
         run: |
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          make exynos7420-zerolteskt_defconfig || make exynos7420-zeroltexx_defconfig || make exynos7420-zeroflte_defconfig
+          make exynos7420-zerolteskt_defconfig || make exynos7420-zeroltexx_defconfig
           make -j$(nproc --all) Image dtbs || make -j4 Image
-          ls -lh arch/arm64/boot/Image*
           mkdir -p ../out_kernel
           cp arch/arm64/boot/Image ../out_kernel/ || cp arch/arm/boot/zImage ../out_kernel/
           find arch/arm64/boot/dts -name "*.dtb" -exec cp {} ../out_kernel/ \; 2>/dev/null || true
+          ls -lh ../out_kernel/
 
-      - name: Download magiskboot for repack
+      - name: Download magiskboot
         run: |
           curl -sL https://github.com/topjohnwu/Magisk/releases/download/v27.0/magisk-27.0.apk -o magisk.apk || true
           unzip -q magisk.apk lib/arm64-v8a/libmagiskboot.so -d magisk_tmp 2>/dev/null || true
           cp magisk_tmp/lib/arm64-v8a/libmagiskboot.so ./magiskboot 2>/dev/null || wget -q https://github.com/ooki/magiskboot_build/raw/master/magiskboot -O magiskboot || true
           chmod +x magiskboot || true
-          ls -lh magiskboot || echo "magiskboot not found, will try mkbootimg"
 
-      - name: Repack boot.img with new kernel + LOS22 ramdisk
+      - name: Repack boot.img
         run: |
-          # Find LOS22 boot.img uploaded to repo root (20MB < 25MB limit, so web upload works)
-          ls -lh *.img 2>/dev/null || true
-          BOOT_IMG=$(ls -1 *.img | grep -i "s6.*edge\|los22\|boot" | head -n 1 || ls -1 *.img | head -n 1 || true)
-          echo "Using boot.img: $BOOT_IMG"
+          BOOT_IMG=$(ls -1 boot.img 2>/dev/null | head -n 1 || ls -1 *.img | grep -v new-boot | head -n 1 || true)
+          echo "BOOT_IMG=$BOOT_IMG"
           if [ -f "$BOOT_IMG" ] && [ -f "./magiskboot" ]; then
             ./magiskboot unpack "$BOOT_IMG" || true
             cp out_kernel/Image kernel 2>/dev/null || cp out_kernel/zImage kernel
-            ls -lh kernel ramdisk.cpio* dtb 2>/dev/null || true
+            ls -lh kernel ramdisk.cpio* 2>/dev/null || true
             ./magiskboot repack "$BOOT_IMG" new-boot-lOS23-zerolteskt.img || true
-            ls -lh new-boot*.img
             mkdir -p out_final
             cp new-boot*.img out_final/ 2>/dev/null || true
           else
-            echo "No LOS22 boot.img found in repo root, uploading kernel Image only"
+            echo "No boot.img, uploading kernel only - flash via AnyKernel"
             mkdir -p out_final
             cp -r out_kernel/* out_final/
           fi
           ls -lh out_final/
 
-      - name: Upload kernel
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: kernel-los23-zerolteskt-G925S
-          path: |
-            out_final/
-            out_kernel/
+          path: out_final/
